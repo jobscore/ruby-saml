@@ -29,6 +29,7 @@ module OneLogin
           settings.name_identifier_format = idp_name_id_format
           settings.idp_sso_target_url = single_signon_service_url
           settings.idp_slo_target_url = single_logout_service_url
+          settings.idp_cert = certificate
           settings.idp_cert_fingerprint = fingerprint
         end
       end
