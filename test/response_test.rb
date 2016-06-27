@@ -204,7 +204,7 @@ class RubySamlTest < Minitest::Test
           settings.issuer = 'invalid'
           response_valid_signed.settings = settings
           response_valid_signed.soft = false
-          error_msg = "#{response_valid_signed.settings.issuer} is not a valid audience for this Response"
+          error_msg = "#{response_valid_signed.settings.issuer} is not a valid audience for this Response - Valid audiences: https://someone.example.com/audience"
           assert_raises(OneLogin::RubySaml::ValidationError, error_msg) do
             response_valid_signed.is_valid?
           end
@@ -368,7 +368,7 @@ class RubySamlTest < Minitest::Test
           settings.issuer = 'invalid'
           response_valid_signed.settings = settings
           response_valid_signed.is_valid?
-          assert_includes response_valid_signed.errors, "#{response_valid_signed.settings.issuer} is not a valid audience for this Response"
+          assert_includes response_valid_signed.errors, "#{response_valid_signed.settings.issuer} is not a valid audience for this Response - Valid audiences: https://someone.example.com/audience"
         end
 
         it "return false when no ID present in the SAML Response" do
@@ -389,12 +389,22 @@ class RubySamlTest < Minitest::Test
         end
 
         it "return true when a nil URI is given in the ds:Reference" do
-
-          response_without_reference_uri.stubs(:conditions).returns(nil)
+          settings.idp_cert = ruby_saml_cert_text
           response_without_reference_uri.settings = settings
-          response_without_reference_uri.settings.idp_cert_fingerprint = "19:4D:97:E4:D8:C9:C8:CF:A4:B7:21:E5:EE:49:7F:D9:66:0E:52:13"
-          assert response_without_reference_uri.is_valid?
+          response_without_reference_uri.stubs(:conditions).returns(nil)
+          response_without_reference_uri.is_valid?
           assert_empty response_without_reference_uri.errors
+          assert 'saml@user.com', response_without_reference_uri.attributes['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress']
+        end
+
+        it "collect errors when collect_errors=true" do
+          settings.idp_cert = ruby_saml_cert_text
+          settings.issuer = 'invalid'
+          response_invalid_subjectconfirmation_recipient.settings = settings
+          collect_errors = true
+          response_invalid_subjectconfirmation_recipient.is_valid?(collect_errors)
+          assert_includes response_invalid_subjectconfirmation_recipient.errors, "invalid is not a valid audience for this Response - Valid audiences: http://stuff.com/endpoints/metadata.php"
+          assert_includes response_invalid_subjectconfirmation_recipient.errors, "Invalid Signature on SAML Response"
         end
       end
     end
@@ -411,7 +421,22 @@ class RubySamlTest < Minitest::Test
         response.settings = settings
         response.settings.issuer = 'invalid_audience'
         assert !response.send(:validate_audience)
-        assert_includes response.errors, "#{response.settings.issuer} is not a valid audience for this Response"
+        assert_includes response.errors, "#{response.settings.issuer} is not a valid audience for this Response - Valid audiences: {audience}"
+      end
+    end
+
+    describe "#validate_destination" do
+      it "return true when the destination of the SAML Response matches the assertion consumer service url" do
+        response.settings = settings
+        assert response.send(:validate_destination)
+        assert_empty response.errors
+      end
+
+      it "return false when the destination of the SAML Response does not match the assertion consumer service url" do
+        response.settings = settings
+        response.settings.assertion_consumer_service_url = 'invalid_acs'
+        assert !response.send(:validate_destination)
+        assert_includes response.errors, "The response was received at #{response.destination} instead of #{response.settings.assertion_consumer_service_url}"
       end
     end
 
@@ -551,7 +576,7 @@ class RubySamlTest < Minitest::Test
         response_invalid_audience.settings = settings
         response_invalid_audience.settings.issuer = "https://invalid.example.com/audience"
         assert !response_invalid_audience.send(:validate_audience)
-        assert_includes response_invalid_audience.errors, "#{response_invalid_audience.settings.issuer} is not a valid audience for this Response"
+        assert_includes response_invalid_audience.errors, "#{response_invalid_audience.settings.issuer} is not a valid audience for this Response - Valid audiences: http://invalid.audience.com"
       end
     end
 
@@ -653,7 +678,7 @@ class RubySamlTest < Minitest::Test
         assert !response.send(:validate_session_expiration)
         assert_includes response.errors, "The attributes have expired, based on the SessionNotOnOrAfter of the AttributeStatement of this Response"
       end
-      
+
       it "returns true when the session has expired, but is still within the allowed_clock_drift" do
         drift = (Time.now - Time.parse("2010-11-19T21:57:37Z")) * 60 # seconds ago that this assertion expired
         drift += 10 # add a buffer of 10 seconds to make sure the test passes
@@ -719,7 +744,7 @@ class RubySamlTest < Minitest::Test
         settings.idp_cert = signature_1
         response_valid_signed_without_x509certificate.settings = settings
         assert !response_valid_signed_without_x509certificate.send(:validate_signature)
-        assert_includes response_valid_signed_without_x509certificate.errors, "Invalid Signature on SAML Response"        
+        assert_includes response_valid_signed_without_x509certificate.errors, "Invalid Signature on SAML Response"
       end
 
       it "return true when no X509Certificate and the cert provided at settings matches" do
@@ -729,6 +754,17 @@ class RubySamlTest < Minitest::Test
         assert response_valid_signed_without_x509certificate.send(:validate_signature)
         assert_empty response_valid_signed_without_x509certificate.errors
       end
+
+      it "return false when signature wrapping attack" do
+        signature_wrapping_attack = read_invalid_response("signature_wrapping_attack.xml.base64")
+        response_wrapped = OneLogin::RubySaml::Response.new(signature_wrapping_attack)
+        response_wrapped.stubs(:conditions).returns(nil)
+        response_wrapped.stubs(:validate_subject_confirmation).returns(true)
+        settings.idp_cert_fingerprint = "afe71c28ef740bc87425be13a2263d37971da1f9"
+        response_wrapped.settings = settings
+        assert !response_wrapped.send(:validate_signature)
+        assert_includes response_wrapped.errors, "Invalid Signature on SAML Response"
+       end
     end
 
     describe "#nameid" do
@@ -745,6 +781,13 @@ class RubySamlTest < Minitest::Test
       it "be extractable from a Simple SAML PHP response" do
         response_ssp = OneLogin::RubySaml::Response.new(fixture(:simple_saml_php))
         assert_equal "someone@example.com", response_ssp.nameid
+      end
+    end
+
+    describe "#name_id_format" do
+      it "extract the value of the name id element" do
+        assert_equal "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress", response.name_id_format
+        assert_equal "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress", response_with_signed_assertion.name_id_format
       end
     end
 
@@ -964,6 +1007,26 @@ class RubySamlTest < Minitest::Test
       end
     end
 
+    describe '#want_assertion_signed' do
+      before do
+        settings.security[:want_assertions_signed] = true
+        @signed_assertion = OneLogin::RubySaml::Response.new(response_document_with_signed_assertion, :settings => settings)
+        @no_signed_assertion = OneLogin::RubySaml::Response.new(response_document_valid_signed, :settings => settings)
+      end
+
+
+      it 'returns false if :want_assertion_signed enabled and Assertion not signed' do
+        assert !@no_signed_assertion.send(:validate_signed_elements)
+        assert_includes @no_signed_assertion.errors, "The Assertion of the Response is not signed and the SP requires it"
+
+      end
+
+      it 'returns true if :want_assertion_signed enabled and Assertion is signed' do
+        assert @signed_assertion.send(:validate_signed_elements)
+        assert_empty @signed_assertion.errors
+      end
+    end
+
     describe "retrieve nameID" do
       it 'is possible  when nameID inside the assertion' do
         response_valid_signed.settings = settings
@@ -975,12 +1038,17 @@ class RubySamlTest < Minitest::Test
           assert_raises(OneLogin::RubySaml::ValidationError, "An EncryptedID found and no SP private key found on the settings to decrypt it") do
             assert_equal "test@onelogin.com", response_encrypted_nameid.nameid
           end
+
+          assert_raises(OneLogin::RubySaml::ValidationError, "An EncryptedID found and no SP private key found on the settings to decrypt it") do
+            assert_equal "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress", response_encrypted_nameid.name_id_format
+          end
       end
 
       it 'is possible when encryptID inside the assertion and settings has the private key' do
         settings.private_key = ruby_saml_key_text
         response_encrypted_nameid.settings = settings
         assert_equal "test@onelogin.com", response_encrypted_nameid.nameid
+        assert_equal "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress", response_encrypted_nameid.name_id_format
       end
 
     end
@@ -1122,6 +1190,28 @@ class RubySamlTest < Minitest::Test
           "(/p:Response/EncryptedAssertion/)|(/p:Response/a:EncryptedAssertion/)",
           { "p" => "urn:oasis:names:tc:SAML:2.0:protocol", "a" => "urn:oasis:names:tc:SAML:2.0:assertion" }
         )
+        assert_nil encrypted_assertion_node2
+        assert decrypted.name, "Assertion"
+      end
+
+      it "is possible to decrypt the assertion if private key provided and EncryptedKey RetrievalMethod presents in response" do
+        settings.private_key = ruby_saml_key_text
+        resp = read_response('response_with_retrieval_method.xml')
+        response = OneLogin::RubySaml::Response.new(resp, :settings => settings)
+
+        encrypted_assertion_node = REXML::XPath.first(
+          response.document,
+          "(/p:Response/EncryptedAssertion/)|(/p:Response/a:EncryptedAssertion/)",
+          { "p" => "urn:oasis:names:tc:SAML:2.0:protocol", "a" => "urn:oasis:names:tc:SAML:2.0:assertion" }
+        )
+        decrypted = response.send(:decrypt_assertion, encrypted_assertion_node)
+
+        encrypted_assertion_node2 = REXML::XPath.first(
+          decrypted,
+          "(/p:Response/EncryptedAssertion/)|(/p:Response/a:EncryptedAssertion/)",
+          { "p" => "urn:oasis:names:tc:SAML:2.0:protocol", "a" => "urn:oasis:names:tc:SAML:2.0:assertion" }
+        )
+
         assert_nil encrypted_assertion_node2
         assert decrypted.name, "Assertion"
       end
